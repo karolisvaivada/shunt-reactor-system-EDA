@@ -415,18 +415,29 @@ def reactor_full_visualization_interactive(
     ))
 
     # =====================================================
-    # FULL DATA LOSS (BRIGHT MAGENTA)
-    # =====================================================
+# FULL DATA LOSS (ROBUST BLOCK DETECTION)
+# =====================================================
 
-    change = total_zero.astype(int).diff()
+    tz = total_zero.astype(int)
+
+    change = tz.diff().fillna(0)
+
     starts = df.loc[change == 1, time_col]
     ends = df.loc[change == -1, time_col]
+
+# If first row is zero, add start
+    if tz.iloc[0] == 1:
+        starts = pd.concat([pd.Series([df.loc[0, time_col]]), starts])
+
+# If last row is zero, add end
+    if tz.iloc[-1] == 1:
+        ends = pd.concat([ends, pd.Series([df.loc[len(df)-1, time_col]])])
 
     for start, end in zip(starts, ends):
         fig.add_vrect(
             x0=start,
             x1=end,
-            fillcolor="rgba(255,0,150,0.5)",
+            fillcolor="rgba(255,0,150,0.7)",
             line_color="magenta",
             line_width=1
         )
@@ -436,7 +447,7 @@ def reactor_full_visualization_interactive(
         mode="markers",
         marker=dict(color="magenta", size=12),
         name="Full Data Loss"
-    ))
+    )   )
 
     # =====================================================
     # TIMESTAMP GAPS (THICK BLACK DOTTED)
