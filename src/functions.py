@@ -259,42 +259,55 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp"):
 def reactor_full_visualization_interactive(
     df: pd.DataFrame,
     selected_col: str,
-    time_col: str = "TimeStamp"
+    time_col: str = "TimeStamp",
 ):
-
     df = df.copy()
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+
+    # --- Parse + sort time ---
+    df[time_col] = pd.to_datetime(df[time_col], errors="coerce", format="mixed")
     df = df.sort_values(time_col).reset_index(drop=True)
 
     numeric_cols = df.select_dtypes(include=np.number).columns
 
     # =====================================================
+    # Helpers
+    # =====================================================
+    def _get_true_blocks(mask: pd.Series) -> list[tuple[int, int]]:
+        """Return (start_idx, end_idx) inclusive blocks where mask is True."""
+        m = mask.fillna(False).astype(bool).to_numpy()
+        blocks = []
+        start = None
+        for i, v in enumerate(m):
+            if v and start is None:
+                start = i
+            elif (not v) and start is not None:
+                blocks.append((start, i - 1))
+                start = None
+        if start is not None:
+            blocks.append((start, len(m) - 1))
+        return blocks
+
+    # =====================================================
     # TIMESTAMP GAPS
     # =====================================================
-
     diff = df[time_col].diff()
-    expected_freq = diff.mode()[0] if not diff.mode().empty else None
+    expected_freq = diff.mode()[0] if not diff.mode().empty else pd.Timedelta(minutes=10)
 
-    gap_mask = pd.Series(False, index=df.index)
-    gap_times = []
+    gap_mask = diff > expected_freq
+    gap_times = df.loc[gap_mask, time_col]
 
-    if expected_freq is not None:
-        gap_mask = diff > expected_freq
-        gap_times = df.loc[gap_mask, time_col]
-
+    # Break the line at gap points (avoid "fake" signal across missing period)
     df_plot = df.copy()
     df_plot.loc[gap_mask, selected_col] = np.nan
 
     # =====================================================
     # FULL ZERO (DATA LOSS)
     # =====================================================
-
     total_zero = (df[numeric_cols] == 0).all(axis=1)
 
     # =====================================================
-    # REACTOR OFF
+    # REACTOR OFF (I=0 but voltage present) - exclude full-zero
     # =====================================================
-
     reactor_off = (
         (df[["SR_I1_A", "SR_I2_A", "SR_I3_A"]] == 0).all(axis=1)
         & (df["SR_U12_kV"] > 0)
@@ -302,185 +315,177 @@ def reactor_full_visualization_interactive(
     )
 
     # =====================================================
-    # IQR OUTLIERS
+    # IQR OUTLIERS (exclude only FULL zero rows)
     # =====================================================
+    series = df.loc[~total_zero, selected_col].dropna()
+    iqr_mask = pd.Series(False, index=df.index)
 
-    valid = df.loc[~total_zero, selected_col]
+    if series.shape[0] >= 10:
+        q1 = series.quantile(0.25)
+        q3 = series.quantile(0.75)
+        iqr = q3 - q1
+        lower_iqr = q1 - 1.5 * iqr
+        upper_iqr = q3 + 1.5 * iqr
 
-    Q1 = valid.quantile(0.25)
-    Q3 = valid.quantile(0.75)
-    IQR = Q3 - Q1
-
-    lower_iqr = Q1 - 1.5 * IQR
-    upper_iqr = Q3 + 1.5 * IQR
-
-    iqr_mask = (
-        ~total_zero
-        & ((df[selected_col] < lower_iqr) | (df[selected_col] > upper_iqr))
-    )
+        iqr_mask = (~total_zero) & (
+            (df[selected_col] < lower_iqr) | (df[selected_col] > upper_iqr)
+        )
 
     # =====================================================
     # DESIGN LIMIT VIOLATIONS
     # =====================================================
-
     limit_mask = pd.Series(False, index=df.index)
 
-    if "U" in selected_col and selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]:
+    # Voltage limits only for line voltages (not U1/U2/U3)
+    if ("U" in selected_col) and (selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]):
         limit_mask = (df[selected_col] < 27) | (df[selected_col] > 33)
 
+    # Current limits for currents
     if "I" in selected_col:
         limit_mask = (df[selected_col] < 112.6) | (df[selected_col] > 137.6)
 
     # =====================================================
     # CREATE FIGURE
     # =====================================================
-
     fig = go.Figure()
 
     # MAIN SIGNAL
-    fig.add_trace(go.Scatter(
-        x=df_plot[time_col],
-        y=df_plot[selected_col],
-        mode="lines",
-        line=dict(color="black", width=1.8),
-        name="Signal"
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=df_plot[time_col],
+            y=df_plot[selected_col],
+            mode="lines",
+            line=dict(color="black", width=1.8),
+            name="Signal",
+        )
+    )
 
-    # IQR OUTLIERS (BRIGHT RED)
-    fig.add_trace(go.Scatter(
-        x=df.loc[iqr_mask, time_col],
-        y=df.loc[iqr_mask, selected_col],
-        mode="markers",
-        marker=dict(color="red", size=5, line=dict(color="black", width=0.5)),
-        name="IQR Outlier"
-    ))
+    # IQR OUTLIERS
+    fig.add_trace(
+        go.Scatter(
+            x=df.loc[iqr_mask, time_col],
+            y=df.loc[iqr_mask, selected_col],
+            mode="markers",
+            marker=dict(color="red", size=4, line=dict(color="black", width=0.5)),
+            name="IQR Outlier",
+        )
+    )
 
-    # LIMIT VIOLATIONS (BRIGHT BLUE)
-    fig.add_trace(go.Scatter(
-        x=df.loc[limit_mask, time_col],
-        y=df.loc[limit_mask, selected_col],
-        mode="markers",
-        marker=dict(color="blue", size=5, line=dict(color="black", width=0.5)),
-        name="Design Limit Exceeded"
-    ))
+    # DESIGN LIMIT EXCEEDED dots
+    fig.add_trace(
+        go.Scatter(
+            x=df.loc[limit_mask, time_col],
+            y=df.loc[limit_mask, selected_col],
+            mode="markers",
+            marker=dict(color="blue", size=4, line=dict(color="black", width=0.5)),
+            name="Design Limit Exceeded",
+        )
+    )
 
     # =====================================================
     # LIMIT LINES
     # =====================================================
-
-    if "U" in selected_col and selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]:
+    if ("U" in selected_col) and (selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]):
         fig.add_hline(y=27, line_dash="dash", line_color="green")
         fig.add_hline(y=33, line_dash="dash", line_color="green")
-
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None],
-            mode="lines",
-            line=dict(color="green", dash="dash"),
-            name="Voltage Limits"
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                line=dict(color="green", dash="dash"),
+                name="Voltage Limits",
+            )
+        )
 
     if "I" in selected_col:
         fig.add_hline(y=112.6, line_dash="dash", line_color="orange")
         fig.add_hline(y=137.6, line_dash="dash", line_color="orange")
-
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None],
-            mode="lines",
-            line=dict(color="orange", dash="dash"),
-            name="Current Limits"
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                line=dict(color="orange", dash="dash"),
+                name="Current Limits",
+            )
+        )
 
     # =====================================================
-    # REACTOR OFF (BRIGHT GREEN)
+    # REACTOR OFF blocks (GREEN) - robust blocks, visible width
     # =====================================================
-
-    change = reactor_off.astype(int).diff()
-    starts = df.loc[change == 1, time_col]
-    ends = df.loc[change == -1, time_col]
-
-    for start, end in zip(starts, ends):
+    for s, e in _get_true_blocks(reactor_off):
+        x0 = df.loc[s, time_col]
+        x1 = df.loc[e, time_col] + expected_freq
         fig.add_vrect(
-            x0=start,
-            x1=end,
-            fillcolor="rgba(0,255,0,0.6)",
+            x0=x0,
+            x1=x1,
+            fillcolor="rgba(0,255,0,0.35)",
             line_color="green",
-            line_width=1
+            line_width=2,
+            layer="above",
         )
 
-    fig.add_trace(go.Scatter(
-        x=[None], y=[None],
-        mode="markers",
-        marker=dict(color="lime", size=12),
-        name="Reactor OFF"
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="markers",
+            marker=dict(color="lime", size=10),
+            name="Reactor OFF",
+        )
+    )
 
     # =====================================================
-# FULL DATA LOSS (ROBUST BLOCK DETECTION)
-# =====================================================
-
-    tz = total_zero.astype(int)
-
-    change = tz.diff().fillna(0)
-
-    starts = df.loc[change == 1, time_col]
-    ends = df.loc[change == -1, time_col]
-
-# If first row is zero, add start
-    if tz.iloc[0] == 1:
-        starts = pd.concat([pd.Series([df.loc[0, time_col]]), starts])
-
-# If last row is zero, add end
-    if tz.iloc[-1] == 1:
-        ends = pd.concat([ends, pd.Series([df.loc[len(df)-1, time_col]])])
-
-    for start, end in zip(starts, ends):
+    # FULL DATA LOSS blocks (MAGENTA) - FAST + visible online
+    # =====================================================
+    for s, e in _get_true_blocks(total_zero):
+        x0 = df.loc[s, time_col]
+        x1 = df.loc[e, time_col] + expected_freq
         fig.add_vrect(
-            x0=start,
-            x1=end,
-            fillcolor="rgba(255,0,150,0.7)",
+            x0=x0,
+            x1=x1,
+            fillcolor="rgba(255,0,200,0.35)",
             line_color="magenta",
-            line_width=1
+            line_width=2,
+            layer="above",
         )
 
-    fig.add_trace(go.Scatter(
-        x=[None], y=[None],
-        mode="markers",
-        marker=dict(color="magenta", size=12),
-        name="Full Data Loss"
-    )   )
-
-    # =====================================================
-    # TIMESTAMP GAPS (THICK BLACK DOTTED)
-    # =====================================================
-
-    for gap_time in gap_times:
-        fig.add_vline(
-            x=gap_time,
-            line_dash="dot",
-            line_color="black",
-            line_width=2
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="markers",
+            marker=dict(color="magenta", size=10),
+            name="Full Data Loss",
         )
+    )
 
-    fig.add_trace(go.Scatter(
-        x=[None], y=[None],
-        mode="lines",
-        line=dict(color="black", dash="dot", width=2),
-        name="Timestamp Gap"
-    ))
+    # =====================================================
+    # TIMESTAMP GAPS (BLACK dotted vlines)
+    # =====================================================
+    for t in gap_times:
+        fig.add_vline(x=t, line_dash="dot", line_color="black", line_width=2)
+
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="lines",
+            line=dict(color="black", dash="dot", width=2),
+            name="Timestamp Gap",
+        )
+    )
 
     # =====================================================
     # LAYOUT
     # =====================================================
-
     fig.update_layout(
         title=f"{selected_col} – Interactive Reactor Monitoring",
         height=750,
         template="plotly_white",
-        legend=dict(
-            orientation="h",
-            y=1.05,
-            x=0
-        )
+        legend=dict(orientation="h", y=1.08, x=0),
+        margin=dict(t=80),
     )
 
     return fig
