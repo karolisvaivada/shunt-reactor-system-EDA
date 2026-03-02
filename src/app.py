@@ -11,7 +11,6 @@ sys.path.append(str(BASE_DIR / "src"))
 
 from functions import reactor_full_visualization_interactive
 from functions import (
-    reactor_full_visualization_interactive,
     calculate_imbalance,
     plot_imbalance
 )

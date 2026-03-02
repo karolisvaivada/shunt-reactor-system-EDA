@@ -153,15 +153,7 @@ def _print_blocks(df: pd.DataFrame, blocks, time_col: str, label: str):
     print("TOTAL DURATION:", total_duration)
 
 
-def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp", top_n: int = 10) -> None:
-    """
-    Event-focused report:
-    - Timestamp gaps (with row indices)
-    - Total zero blocks (data loss)
-    - Reactor OFF blocks (I phases = 0, voltage present; excluding full-zero rows)
-    - Design limit violation blocks (excluding full-zero & scaling)
-    - IQR outlier summary for ALL numeric variables + top N examples per variable
-    """
+def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp"):
 
     df = df.copy()
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
@@ -179,9 +171,7 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp", top_n: int = 
     diff = df[time_col].diff()
     expected_freq = diff.mode()[0] if not diff.mode().empty else None
 
-    if expected_freq is None:
-        print("Sampling interval could not be determined.")
-    else:
+    if expected_freq is not None:
         gap_mask = diff > expected_freq
         gap_indices = df.index[gap_mask]
         print(f"Gaps detected: {len(gap_indices)}")
@@ -191,6 +181,8 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp", top_n: int = 
             curr_time = df.loc[idx, time_col]
             missing = curr_time - prev_time - expected_freq
             print(f"Rows {idx-1} → {idx} | {prev_time} → {curr_time} | Missing: {missing}")
+    else:
+        print("Sampling interval could not be determined.")
 
     # =====================================================
     # TOTAL ZERO (DATA LOSS)
@@ -199,12 +191,12 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp", top_n: int = 
     _print_blocks(df, _get_true_blocks(total_zero), time_col, "TOTAL ZERO BLOCKS (DATA LOSS)")
 
     # =====================================================
-    # REACTOR OFF (I = 0, Voltage present; exclude full-zero)
+    # REACTOR OFF (I = 0, Voltage present)
     # =====================================================
     reactor_off = (
         (df[["SR_I1_A", "SR_I2_A", "SR_I3_A"]] == 0).all(axis=1)
         & (df["SR_U12_kV"] > 0)
-        & (~total_zero)
+        & (~total_zero)  # important: don't double count full-zero as reactor off
     )
     _print_blocks(df, _get_true_blocks(reactor_off), time_col, "REACTOR OFF BLOCKS")
 
@@ -221,91 +213,47 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp", top_n: int = 
     voltage_violation = valid_mask & (
         (df[voltage_cols] < 27).any(axis=1) | (df[voltage_cols] > 33).any(axis=1)
     )
-    _print_blocks(
-        df,
-        _get_true_blocks(voltage_violation),
-        time_col,
-        "VOLTAGE LIMIT VIOLATION BLOCKS (27–33 kV)"
-    )
+    _print_blocks(df, _get_true_blocks(voltage_violation), time_col,
+                 "VOLTAGE LIMIT VIOLATION BLOCKS (27–33 kV)")
 
     current_cols = ["SR_I1_A", "SR_I2_A", "SR_I3_A"]
     current_violation = valid_mask & (
         (df[current_cols] < 112.6).any(axis=1) | (df[current_cols] > 137.6).any(axis=1)
     )
-    _print_blocks(
-        df,
-        _get_true_blocks(current_violation),
-        time_col,
-        "CURRENT LIMIT VIOLATION BLOCKS (112.6–137.6 A)"
-    )
+    _print_blocks(df, _get_true_blocks(current_violation), time_col,
+                 "CURRENT LIMIT VIOLATION BLOCKS (112.6–137.6 A)")
 
     # =====================================================
-    # IQR OUTLIERS (exclude ONLY full-zero rows)
+    # IQR OUTLIERS (exclude only full-zero rows)
     # =====================================================
     print("\n" + "=" * 100)
     print("IQR OUTLIER DETECTION (Exclude Only FULL ZERO Rows)")
     print("=" * 100)
 
-    # ---- 1) Summary table for ALL numeric columns ----
-    summary_rows = []
-    outlier_info = {}  # store computed (lower, upper, outliers_df) for drill-down
-
     for col in numeric_cols:
-        series = df.loc[~total_zero, col].dropna()
-
-        if series.shape[0] < 10:
-            summary_rows.append([col, np.nan, np.nan, 0, "skip(<10 valid)"])
+        series = df.loc[~total_zero, col]
+        if series.dropna().shape[0] < 10:
             continue
 
         q1 = series.quantile(0.25)
         q3 = series.quantile(0.75)
         iqr = q3 - q1
 
-        if iqr == 0 or pd.isna(iqr):
-            summary_rows.append([col, float(q1), float(q3), 0, "skip(IQR=0)"])
-            continue
-
         lower = q1 - 1.5 * iqr
         upper = q3 + 1.5 * iqr
 
-        mask = (~total_zero) & ((df[col] < lower) | (df[col] > upper))
-        outliers = df.loc[mask, [time_col, col]].copy()
+        outliers = df[(~total_zero) & ((df[col] < lower) | (df[col] > upper))]
 
-        summary_rows.append([col, float(lower), float(upper), int(mask.sum()), "ok"])
-        outlier_info[col] = (lower, upper, outliers)
-
-    summary = pd.DataFrame(
-        summary_rows,
-        columns=["variable", "iqr_lower", "iqr_upper", "outliers_count", "status"]
-    ).sort_values("outliers_count", ascending=False)
-
-    print("\nIQR OUTLIER SUMMARY (all numeric variables):")
-    print(summary.to_string(index=False))
-
-    # ---- 2) Detailed examples ONLY for variables that have outliers ----
-    cols_with_outliers = summary.loc[summary["outliers_count"] > 0, "variable"].tolist()
-
-    print("\n" + "-" * 100)
-    print(f"IQR OUTLIER EXAMPLES (top {top_n} rows per variable; only variables with outliers)")
-    print("-" * 100)
-
-    if not cols_with_outliers:
-        print("No IQR outliers detected in any numeric column (after excluding full-zero rows).")
-    else:
-        for col in cols_with_outliers:
-            lower, upper, outliers = outlier_info[col]
-
-            print(f"\nVariable: {col}")
-            print(f"Lower bound: {lower:.3f} | Upper bound: {upper:.3f}")
-            print(f"Outliers detected: {len(outliers)}")
-
-            # show earliest outliers; change to .sort_values(col) if you want extremes
-            outliers_sorted = outliers.sort_values(time_col)
-            print(outliers_sorted.head(top_n).to_string(index=True))
+        print(f"\nVariable: {col}")
+        print(f"Lower bound: {lower:.3f} | Upper bound: {upper:.3f}")
+        print(f"Outliers detected: {len(outliers)}")
+        if not outliers.empty:
+            print(outliers[[time_col, col]])
 
     print("\n" + "=" * 100)
-    print(f"END OF REPORT | Processed {len(numeric_cols)} numeric columns: {list(numeric_cols)}")
+    print("END OF REPORT")
     print("=" * 100)
+
 
 
 def reactor_full_visualization_interactive(
