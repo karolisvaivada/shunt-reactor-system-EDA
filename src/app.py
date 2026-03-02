@@ -10,6 +10,11 @@ BASE_DIR = Path(__file__).resolve().parent
 sys.path.append(str(BASE_DIR / "src"))
 
 from functions import reactor_full_visualization_interactive
+from functions import (
+    reactor_full_visualization_interactive,
+    calculate_imbalance,
+    plot_imbalance
+)
 
 st.set_page_config(layout="wide")
 
@@ -30,6 +35,7 @@ def load_data():
     return df
 
 df = load_data()
+df = calculate_imbalance(df)
 
 numeric_cols = df.select_dtypes(include=np.number).columns
 
@@ -46,3 +52,9 @@ selected_col = st.selectbox("Select Variable", numeric_cols)
 fig = reactor_full_visualization_interactive(df, selected_col)
 
 st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("### Phase & Line Imbalance Analysis")
+
+imbalance_fig = plot_imbalance(df)
+
+st.plotly_chart(imbalance_fig, use_container_width=True)
