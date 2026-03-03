@@ -259,54 +259,42 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp"):
 def reactor_full_visualization_interactive(
     df: pd.DataFrame,
     selected_col: str,
-    time_col: str = "TimeStamp",
+    time_col: str = "TimeStamp"
 ):
     df = df.copy()
-
-    # --- Parse + sort time ---
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce", format="mixed")
     df = df.sort_values(time_col).reset_index(drop=True)
 
-    numeric_cols = df.select_dtypes(include=np.number).columns
-
-    # =====================================================
-    # Helpers
-    # =====================================================
-    def _get_true_blocks(mask: pd.Series) -> list[tuple[int, int]]:
-        """Return (start_idx, end_idx) inclusive blocks where mask is True."""
-        m = mask.fillna(False).astype(bool).to_numpy()
-        blocks = []
-        start = None
-        for i, v in enumerate(m):
-            if v and start is None:
-                start = i
-            elif (not v) and start is not None:
-                blocks.append((start, i - 1))
-                start = None
-        if start is not None:
-            blocks.append((start, len(m) - 1))
-        return blocks
+    # ---- IMPORTANT: use only base measurement columns (exclude derived % columns) ----
+    base_numeric_cols = [
+        c for c in df.select_dtypes(include=np.number).columns
+        if not c.endswith("_%")
+    ]
 
     # =====================================================
     # TIMESTAMP GAPS
     # =====================================================
     diff = df[time_col].diff()
-    expected_freq = diff.mode()[0] if not diff.mode().empty else pd.Timedelta(minutes=10)
+    expected_freq = diff.mode()[0] if not diff.mode().empty else None
 
-    gap_mask = diff > expected_freq
-    gap_times = df.loc[gap_mask, time_col]
+    gap_mask = pd.Series(False, index=df.index)
+    gap_times = []
 
-    # Break the line at gap points (avoid "fake" signal across missing period)
+    if expected_freq is not None:
+        gap_mask = diff > expected_freq
+        gap_times = df.loc[gap_mask, time_col].tolist()
+
+    # break the line at gap start rows
     df_plot = df.copy()
     df_plot.loc[gap_mask, selected_col] = np.nan
 
     # =====================================================
-    # FULL ZERO (DATA LOSS)
+    # FULL ZERO (DATA LOSS)  ✅ now works in Streamlit too
     # =====================================================
-    total_zero = (df[numeric_cols] == 0).all(axis=1)
+    total_zero = (df[base_numeric_cols] == 0).all(axis=1)
 
     # =====================================================
-    # REACTOR OFF (I=0 but voltage present) - exclude full-zero
+    # REACTOR OFF (currents = 0, voltage present, not full-zero)
     # =====================================================
     reactor_off = (
         (df[["SR_I1_A", "SR_I2_A", "SR_I3_A"]] == 0).all(axis=1)
@@ -315,177 +303,162 @@ def reactor_full_visualization_interactive(
     )
 
     # =====================================================
-    # IQR OUTLIERS (exclude only FULL zero rows)
+    # IQR OUTLIERS (exclude only FULL ZERO rows)
     # =====================================================
-    series = df.loc[~total_zero, selected_col].dropna()
+    valid = df.loc[~total_zero, selected_col].dropna()
     iqr_mask = pd.Series(False, index=df.index)
 
-    if series.shape[0] >= 10:
-        q1 = series.quantile(0.25)
-        q3 = series.quantile(0.75)
+    if len(valid) >= 10:
+        q1 = valid.quantile(0.25)
+        q3 = valid.quantile(0.75)
         iqr = q3 - q1
         lower_iqr = q1 - 1.5 * iqr
         upper_iqr = q3 + 1.5 * iqr
 
-        iqr_mask = (~total_zero) & (
-            (df[selected_col] < lower_iqr) | (df[selected_col] > upper_iqr)
+        iqr_mask = (
+            ~total_zero
+            & ((df[selected_col] < lower_iqr) | (df[selected_col] > upper_iqr))
         )
 
     # =====================================================
-    # DESIGN LIMIT VIOLATIONS
-    # =====================================================
+# DESIGN LIMIT VIOLATIONS
+# Exclude ONLY FULL ZERO rows
+# Reactor OFF rows are allowed to be violations
+# =====================================================
+
     limit_mask = pd.Series(False, index=df.index)
 
-    # Voltage limits only for line voltages (not U1/U2/U3)
-    if ("U" in selected_col) and (selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]):
-        limit_mask = (df[selected_col] < 27) | (df[selected_col] > 33)
+# Valid data = not full zero
+    valid_data = ~total_zero
 
-    # Current limits for currents
+    if "U" in selected_col and selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]:
+        limit_mask = (
+            valid_data &
+            ((df[selected_col] < 27) | (df[selected_col] > 33))
+        )
+
     if "I" in selected_col:
-        limit_mask = (df[selected_col] < 112.6) | (df[selected_col] > 137.6)
+        limit_mask = (
+            valid_data &
+            ((df[selected_col] < 112.6) | (df[selected_col] > 137.6))
+        )
 
     # =====================================================
-    # CREATE FIGURE
+    # FIGURE
     # =====================================================
     fig = go.Figure()
 
-    # MAIN SIGNAL
-    fig.add_trace(
-        go.Scatter(
-            x=df_plot[time_col],
-            y=df_plot[selected_col],
-            mode="lines",
-            line=dict(color="black", width=1.8),
-            name="Signal",
-        )
-    )
+    # Signal
+    fig.add_trace(go.Scatter(
+        x=df_plot[time_col],
+        y=df_plot[selected_col],
+        mode="lines",
+        line=dict(color="black", width=1.8),
+        name="Signal"
+    ))
 
-    # IQR OUTLIERS
-    fig.add_trace(
-        go.Scatter(
-            x=df.loc[iqr_mask, time_col],
-            y=df.loc[iqr_mask, selected_col],
-            mode="markers",
-            marker=dict(color="red", size=4, line=dict(color="black", width=0.5)),
-            name="IQR Outlier",
-        )
-    )
+    # IQR outliers
+    fig.add_trace(go.Scatter(
+        x=df.loc[iqr_mask, time_col],
+        y=df.loc[iqr_mask, selected_col],
+        mode="markers",
+        marker=dict(color="red", size=5, line=dict(color="black", width=0.5)),
+        name="IQR Outlier"
+    ))
 
-    # DESIGN LIMIT EXCEEDED dots
-    fig.add_trace(
-        go.Scatter(
-            x=df.loc[limit_mask, time_col],
-            y=df.loc[limit_mask, selected_col],
-            mode="markers",
-            marker=dict(color="blue", size=4, line=dict(color="black", width=0.5)),
-            name="Design Limit Exceeded",
-        )
-    )
+    # Design limit exceeded
+    fig.add_trace(go.Scatter(
+        x=df.loc[limit_mask, time_col],
+        y=df.loc[limit_mask, selected_col],
+        mode="markers",
+        marker=dict(color="blue", size=5, line=dict(color="black", width=0.5)),
+        name="Design Limit Exceeded"
+    ))
 
-    # =====================================================
-    # LIMIT LINES
-    # =====================================================
-    if ("U" in selected_col) and (selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]):
+    # Limit lines
+    if "U" in selected_col and selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]:
         fig.add_hline(y=27, line_dash="dash", line_color="green")
         fig.add_hline(y=33, line_dash="dash", line_color="green")
-        fig.add_trace(
-            go.Scatter(
-                x=[None],
-                y=[None],
-                mode="lines",
-                line=dict(color="green", dash="dash"),
-                name="Voltage Limits",
-            )
-        )
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                 line=dict(color="green", dash="dash"),
+                                 name="Voltage Limits"))
 
     if "I" in selected_col:
         fig.add_hline(y=112.6, line_dash="dash", line_color="orange")
         fig.add_hline(y=137.6, line_dash="dash", line_color="orange")
-        fig.add_trace(
-            go.Scatter(
-                x=[None],
-                y=[None],
-                mode="lines",
-                line=dict(color="orange", dash="dash"),
-                name="Current Limits",
-            )
-        )
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                 line=dict(color="orange", dash="dash"),
+                                 name="Current Limits"))
 
-    # =====================================================
-    # REACTOR OFF blocks (GREEN) - robust blocks, visible width
-    # =====================================================
-    for s, e in _get_true_blocks(reactor_off):
-        x0 = df.loc[s, time_col]
-        x1 = df.loc[e, time_col] + expected_freq
+    # Reactor OFF blocks (green vrect)
+    change = reactor_off.astype(int).diff().fillna(0)
+    starts = df.loc[change == 1, time_col].tolist()
+    ends = df.loc[change == -1, time_col].tolist()
+
+    if reactor_off.iloc[0]:
+        starts = [df.loc[0, time_col]] + starts
+    if reactor_off.iloc[-1]:
+        ends = ends + [df.loc[df.index[-1], time_col]]
+
+    for start, end in zip(starts, ends):
         fig.add_vrect(
-            x0=x0,
-            x1=x1,
+            x0=start, x1=end,
             fillcolor="rgba(0,255,0,0.35)",
-            line_color="green",
-            line_width=2,
-            layer="above",
+            line_color="rgba(0,180,0,0.9)",
+            line_width=1
         )
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode="markers",
+        marker=dict(color="lime", size=10),
+        name="Reactor OFF"
+    ))
 
-    fig.add_trace(
-        go.Scatter(
-            x=[None],
-            y=[None],
-            mode="markers",
-            marker=dict(color="lime", size=10),
-            name="Reactor OFF",
-        )
-    )
+    # FULL ZERO blocks (magenta vrect) ✅ better than per-row vline (fast + visible)
+    change = total_zero.astype(int).diff().fillna(0)
+    starts = df.loc[change == 1, time_col].tolist()
+    ends = df.loc[change == -1, time_col].tolist()
 
-    # =====================================================
-    # FULL DATA LOSS blocks (MAGENTA) - FAST + visible online
-    # =====================================================
-    for s, e in _get_true_blocks(total_zero):
-        x0 = df.loc[s, time_col]
-        x1 = df.loc[e, time_col] + expected_freq
+    if total_zero.iloc[0]:
+        starts = [df.loc[0, time_col]] + starts
+    if total_zero.iloc[-1]:
+        ends = ends + [df.loc[df.index[-1], time_col]]
+
+    for start, end in zip(starts, ends):
         fig.add_vrect(
-            x0=x0,
-            x1=x1,
-            fillcolor="rgba(255,0,200,0.35)",
-            line_color="magenta",
-            line_width=2,
-            layer="above",
+            x0=start, x1=end,
+            fillcolor="rgba(255,0,200,0.22)",
+            line_color="rgba(255,0,200,0.75)",
+            line_width=1.4
+        )
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode="markers",
+        marker=dict(color="magenta", size=10),
+        name="Full Data Loss"
+    ))
+
+    # Timestamp gaps (black dotted vertical lines)
+    for gap_time in gap_times:
+        fig.add_vline(
+            x=gap_time,
+            line_dash="dot",
+            line_color="rgba(0,0,0,0.35)",  # lighter gray
+            line_width=1                   # thinner
         )
 
-    fig.add_trace(
-        go.Scatter(
-            x=[None],
-            y=[None],
-            mode="markers",
-            marker=dict(color="magenta", size=10),
-            name="Full Data Loss",
-        )
-    )
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode="lines",
+        line=dict(color="rgba(0,0,0,0.35)", dash="dot", width=1),
+        name="Timestamp Gap"
+    ))
 
-    # =====================================================
-    # TIMESTAMP GAPS (BLACK dotted vlines)
-    # =====================================================
-    for t in gap_times:
-        fig.add_vline(x=t, line_dash="dot", line_color="black", line_width=2)
-
-    fig.add_trace(
-        go.Scatter(
-            x=[None],
-            y=[None],
-            mode="lines",
-            line=dict(color="black", dash="dot", width=2),
-            name="Timestamp Gap",
-        )
-    )
-
-    # =====================================================
-    # LAYOUT
-    # =====================================================
     fig.update_layout(
         title=f"{selected_col} – Interactive Reactor Monitoring",
         height=750,
         template="plotly_white",
-        legend=dict(orientation="h", y=1.08, x=0),
-        margin=dict(t=80),
+        legend=dict(orientation="h", y=1.05, x=0)
     )
 
     return fig
@@ -494,77 +467,221 @@ def calculate_imbalance(df: pd.DataFrame):
 
     df = df.copy()
 
-    # -------- LINE VOLTAGE IMBALANCE ----------
+    # Mask valid operating state
+    valid_current = (
+        (df[["SR_I1_A","SR_I2_A","SR_I3_A"]].mean(axis=1) > 10)
+    )
+
+    valid_voltage = (
+        (df[["SR_U12_kV","SR_U23_kV","SR_U31_kV"]].mean(axis=1) > 5)
+    )
+
+    # LINE VOLTAGE
     line_cols = ["SR_U12_kV", "SR_U23_kV", "SR_U31_kV"]
+    line_mean = df[line_cols].mean(axis=1)
 
-    df["U_line_imbalance_%"] = (
-        (df[line_cols].max(axis=1) - df[line_cols].min(axis=1))
-        / df[line_cols].mean(axis=1)
-    ) * 100
+    df["U_line_imbalance_%"] = np.where(
+        valid_voltage,
+        (df[line_cols].max(axis=1) - df[line_cols].min(axis=1)) / line_mean * 100,
+        np.nan
+    )
 
-    # -------- PHASE VOLTAGE IMBALANCE ----------
+    # PHASE VOLTAGE
     phase_cols = ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]
+    phase_mean = df[phase_cols].mean(axis=1)
 
-    df["U_phase_imbalance_%"] = (
-        (df[phase_cols].max(axis=1) - df[phase_cols].min(axis=1))
-        / df[phase_cols].mean(axis=1)
-    ) * 100
+    df["U_phase_imbalance_%"] = np.where(
+        valid_voltage,
+        (df[phase_cols].max(axis=1) - df[phase_cols].min(axis=1)) / phase_mean * 100,
+        np.nan
+    )
 
-    # -------- CURRENT IMBALANCE ----------
+    # CURRENT
     current_cols = ["SR_I1_A", "SR_I2_A", "SR_I3_A"]
+    current_mean = df[current_cols].mean(axis=1)
 
-    df["I_imbalance_%"] = (
-        (df[current_cols].max(axis=1) - df[current_cols].min(axis=1))
-        / df[current_cols].mean(axis=1)
-    ) * 100
+    df["I_imbalance_%"] = np.where(
+        valid_current,
+        (df[current_cols].max(axis=1) - df[current_cols].min(axis=1)) / current_mean * 100,
+        np.nan
+    )
 
     return df
 
-def plot_imbalance(df: pd.DataFrame, time_col="TimeStamp"):
+def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
 
     df = df.copy()
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+    df = df.sort_values(time_col).reset_index(drop=True)
+
+    # =====================================================
+    # TIMESTAMP GAP DETECTION
+    # =====================================================
+    diff = df[time_col].diff()
+    expected_freq = diff.mode()[0] if not diff.mode().empty else None
+
+    gap_mask = pd.Series(False, index=df.index)
+    gap_times = []
+
+    if expected_freq is not None:
+        gap_mask = diff > expected_freq
+        gap_times = df.loc[gap_mask, time_col].tolist()
+
+    # Break line BEFORE gap (not remove real values)
+    df_plot = df.copy()
+    imbalance_cols = ["U_line_imbalance_%", "U_phase_imbalance_%", "I_imbalance_%"]
+
+    gap_indices = df.index[gap_mask]
+
+    for idx in gap_indices:
+        if idx > 0:
+            for col in imbalance_cols:
+                if col in df_plot.columns:
+                    df_plot.loc[idx - 1, col] = np.nan
+
+    # =====================================================
+    # FULL ZERO BLOCKS
+    # =====================================================
+    base_numeric_cols = [
+        c for c in df.select_dtypes(include=np.number).columns
+        if not c.endswith("_%")
+    ]
+
+    total_zero = (df[base_numeric_cols] == 0).all(axis=1)
+
+    reactor_off = (
+        (df[["SR_I1_A", "SR_I2_A", "SR_I3_A"]] == 0).all(axis=1)
+        & (df["SR_U12_kV"] > 0)
+        & (~total_zero)
+    )
+
+    def _get_blocks(mask):
+        mask_int = mask.astype(int)
+        change = mask_int.diff().fillna(0)
+
+        starts = df.loc[change == 1, time_col].tolist()
+        ends = df.loc[change == -1, time_col].tolist()
+
+        if mask.iloc[0]:
+            starts = [df.loc[0, time_col]] + starts
+        if mask.iloc[-1]:
+            ends = ends + [df.loc[df.index[-1], time_col]]
+
+        return starts, ends
 
     fig = go.Figure()
 
-    # -------- LINE VOLTAGE ----------
+    # =========================
+    # Imbalance Lines
+    # =========================
     fig.add_trace(go.Scatter(
-        x=df[time_col],
-        y=df["U_line_imbalance_%"],
+        x=df_plot[time_col],
+        y=df_plot["U_line_imbalance_%"],
         mode="lines",
-        line=dict(color="blue", width=2),
-        name="Line Voltage Imbalance %"
+        line=dict(width=2),
+        name="Line Voltage Imbalance (%)"
     ))
 
-    # -------- PHASE VOLTAGE ----------
     fig.add_trace(go.Scatter(
-        x=df[time_col],
-        y=df["U_phase_imbalance_%"],
+        x=df_plot[time_col],
+        y=df_plot["U_phase_imbalance_%"],
         mode="lines",
-        line=dict(color="purple", width=2),
-        name="Phase Voltage Imbalance %"
+        line=dict(width=2),
+        name="Phase Voltage Imbalance (%)"
     ))
 
-    # -------- CURRENT ----------
     fig.add_trace(go.Scatter(
-        x=df[time_col],
-        y=df["I_imbalance_%"],
+        x=df_plot[time_col],
+        y=df_plot["I_imbalance_%"],
         mode="lines",
-        line=dict(color="red", width=2),
-        name="Current Imbalance %"
+        line=dict(width=2),
+        name="Current Imbalance (%)"
     ))
 
-    # -------- Threshold Lines ----------
-    fig.add_hline(y=2, line_dash="dash", line_color="green")
-    fig.add_hline(y=3, line_dash="dash", line_color="orange")
-    fig.add_hline(y=5, line_dash="dash", line_color="red")
+    # =========================
+    # Thresholds
+    # =========================
+    for level in [2, 3, 5]:
+        fig.add_hline(y=level, line_dash="dash")
 
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode="lines",
+        line=dict(dash="dash"),
+        name="Imbalance Thresholds (2%, 3%, 5%)"
+    ))
+
+    # =========================
+    # Reactor OFF
+    # =========================
+    starts, ends = _get_blocks(reactor_off)
+
+    for start, end in zip(starts, ends):
+        fig.add_vrect(
+            x0=start,
+            x1=end,
+            fillcolor="rgba(0,255,0,0.25)",
+            line_color="rgba(0,180,0,0.9)"
+        )
+
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode="markers",
+        marker=dict(color="lime", size=10),
+        name="Reactor OFF"
+    ))
+
+    # =========================
+    # Full Data Loss
+    # =========================
+    starts, ends = _get_blocks(total_zero)
+
+    for start, end in zip(starts, ends):
+        fig.add_vrect(
+            x0=start,
+            x1=end,
+            fillcolor="rgba(255,0,200,0.22)",
+            line_color="rgba(255,0,200,0.75)",
+            line_width=1.2
+        )
+
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode="markers",
+        marker=dict(color="magenta", size=10),
+        name="Full Data Loss"
+    ))
+
+    # =========================
+    # Timestamp Gaps
+    # =========================
+    for gap_time in gap_times:
+        fig.add_vline(
+            x=gap_time,
+            line_dash="dot",
+            line_color="rgba(0,0,0,0.35)",
+            line_width=1
+        )
+
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode="lines",
+        line=dict(color="rgba(0,0,0,0.35)", dash="dot", width=1),
+        name="Timestamp Gap"
+    ))
+
+    # =========================
+    # Layout
+    # =========================
     fig.update_layout(
         title="Voltage & Current Imbalance Monitoring",
-        height=750,
+        height=720,
         template="plotly_white",
-        legend=dict(orientation="h", y=1.05, x=0),
+        legend=dict(orientation="h", y=1.08, x=0),
         yaxis_title="Imbalance (%)"
     )
+
+    # AUTO SCALE (important)
+    fig.update_yaxes(autorange=True)
 
     return fig
