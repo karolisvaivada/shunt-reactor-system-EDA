@@ -17,7 +17,7 @@ st.title("⚡ Shunt Reactor Monitoring Dashboard")
 
 @st.cache_data(show_spinner=False)
 def load_data():
-    base_dir = Path(__file__).resolve().parent  # .../src
+    base_dir = Path(__file__).resolve().parent  
     data_path = base_dir / "data" / "Park1_SR_data.csv"
 
     df = pd.read_csv(
@@ -28,17 +28,14 @@ def load_data():
         engine="python"
     )
 
-    # Timestamp parse (mixed date + datetime)
     df["TimeStamp"] = pd.to_datetime(df["TimeStamp"], errors="coerce", format="mixed")
 
-    # Force numerics (important for Streamlit Cloud dtype issues)
     for col in df.columns:
         if col != "TimeStamp":
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.sort_values("TimeStamp").reset_index(drop=True)
 
-    # add imbalance columns
     df = calculate_imbalance(df)
 
     return df, str(data_path)
@@ -46,9 +43,6 @@ def load_data():
 
 df, data_path_used = load_data()
 
-# =====================================================
-# Sidebar controls
-# =====================================================
 numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
 st.sidebar.header("Controls")
@@ -60,9 +54,6 @@ selected_col = st.sidebar.selectbox(
 
 show_debug = st.sidebar.checkbox("Show debug info", value=False)
 
-# =====================================================
-# Debug panel (optional)
-# =====================================================
 if show_debug:
     with st.expander("🛠 Debug", expanded=True):
         st.write("CSV path used:", data_path_used)
@@ -73,9 +64,6 @@ if show_debug:
         full_zero = (df[base_numeric] == 0).all(axis=1)
         st.write("FULL ZERO rows:", int(full_zero.sum()))
 
-# =====================================================
-# Layout: Main plot + imbalance plot
-# =====================================================
 tab1, tab2 = st.tabs(["📈 Variable Monitoring", "⚖️ Imbalance Monitoring"])
 
 with tab1:

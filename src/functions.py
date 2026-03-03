@@ -22,9 +22,6 @@ def df_check(df: pd.DataFrame, time_col: str = "TimeStamp"):
     print("\nDtypes:")
     print(df.dtypes)
 
-    # ------------------------------------------------------------
-    # TIMESTAMP CHECK
-    # ------------------------------------------------------------
     print("\n" + "="*70)
     print("TIMESTAMP CHECK")
     print("="*70)
@@ -49,17 +46,11 @@ def df_check(df: pd.DataFrame, time_col: str = "TimeStamp"):
         else:
             print("Could not determine sampling interval.")
 
-    # ------------------------------------------------------------
-    # DUPLICATE ROWS
-    # ------------------------------------------------------------
     print("\n" + "="*70)
     print("DUPLICATE ROWS")
     print("="*70)
     print(f"Fully duplicated rows: {df.duplicated().sum()}")
 
-    # ------------------------------------------------------------
-    # MISSING VALUES
-    # ------------------------------------------------------------
     print("\n" + "="*70)
     print("MISSING VALUES")
     print("="*70)
@@ -69,9 +60,6 @@ def df_check(df: pd.DataFrame, time_col: str = "TimeStamp"):
     print("\nMissing per column:")
     print(missing_per_col[missing_per_col > 0])
 
-    # ------------------------------------------------------------
-    # ZERO VALUES
-    # ------------------------------------------------------------
     print("\n" + "="*70)
     print("ZERO VALUES")
     print("="*70)
@@ -83,9 +71,6 @@ def df_check(df: pd.DataFrame, time_col: str = "TimeStamp"):
     print("\nZero values per column:")
     print(zero_per_col[zero_per_col > 0])
 
-    # ------------------------------------------------------------
-    # NEGATIVE VALUES
-    # ------------------------------------------------------------
     print("\n" + "="*70)
     print("NEGATIVE VALUES")
     print("="*70)
@@ -110,16 +95,13 @@ def _get_true_blocks(mask: pd.Series):
     if n == 0:
         return []
 
-    # Find boundaries where mask changes value
     changes = np.diff(mask.astype(int))
     starts = list(np.where(changes == 1)[0] + 1)
     ends = list(np.where(changes == -1)[0])
 
-    # If the mask starts True, add start at 0
     if mask[0]:
         starts = [0] + starts
 
-    # If the mask ends True, add end at last index
     if mask[-1]:
         ends = ends + [n - 1]
 
@@ -161,9 +143,6 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp"):
 
     numeric_cols = df.select_dtypes(include="number").columns
 
-    # =====================================================
-    # TIMESTAMP GAPS
-    # =====================================================
     print("\n" + "=" * 100)
     print("TIMESTAMP GAPS")
     print("=" * 100)
@@ -184,30 +163,21 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp"):
     else:
         print("Sampling interval could not be determined.")
 
-    # =====================================================
-    # TOTAL ZERO (DATA LOSS)
-    # =====================================================
     total_zero = (df[numeric_cols] == 0).all(axis=1)
     _print_blocks(df, _get_true_blocks(total_zero), time_col, "TOTAL ZERO BLOCKS (DATA LOSS)")
 
-    # =====================================================
-    # REACTOR OFF (I = 0, Voltage present)
-    # =====================================================
     reactor_off = (
         (df[["SR_I1_A", "SR_I2_A", "SR_I3_A"]] == 0).all(axis=1)
         & (df["SR_U12_kV"] > 0)
-        & (~total_zero)  # important: don't double count full-zero as reactor off
+        & (~total_zero)  
     )
     _print_blocks(df, _get_true_blocks(reactor_off), time_col, "REACTOR OFF BLOCKS")
 
-    # =====================================================
-    # DESIGN LIMIT VIOLATIONS (exclude full-zero & scaling)
-    # =====================================================
     print("\n" + "=" * 100)
     print("DESIGN LIMIT VIOLATIONS")
     print("=" * 100)
 
-    valid_mask = (~total_zero) & (df["SR_U12_kV"] < 100)
+    valid_mask = ~total_zero
 
     voltage_cols = ["SR_U12_kV", "SR_U23_kV", "SR_U31_kV"]
     voltage_violation = valid_mask & (
@@ -223,9 +193,6 @@ def df_event_report(df: pd.DataFrame, time_col: str = "TimeStamp"):
     _print_blocks(df, _get_true_blocks(current_violation), time_col,
                  "CURRENT LIMIT VIOLATION BLOCKS (112.6–137.6 A)")
 
-    # =====================================================
-    # IQR OUTLIERS (exclude only full-zero rows)
-    # =====================================================
     print("\n" + "=" * 100)
     print("IQR OUTLIER DETECTION (Exclude Only FULL ZERO Rows)")
     print("=" * 100)
@@ -265,15 +232,11 @@ def reactor_full_visualization_interactive(
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce", format="mixed")
     df = df.sort_values(time_col).reset_index(drop=True)
 
-    # ---- IMPORTANT: use only base measurement columns (exclude derived % columns) ----
     base_numeric_cols = [
         c for c in df.select_dtypes(include=np.number).columns
         if not c.endswith("_%")
     ]
 
-    # =====================================================
-    # TIMESTAMP GAPS
-    # =====================================================
     diff = df[time_col].diff()
     expected_freq = diff.mode()[0] if not diff.mode().empty else None
 
@@ -284,27 +247,17 @@ def reactor_full_visualization_interactive(
         gap_mask = diff > expected_freq
         gap_times = df.loc[gap_mask, time_col].tolist()
 
-    # break the line at gap start rows
     df_plot = df.copy()
     df_plot.loc[gap_mask, selected_col] = np.nan
 
-    # =====================================================
-    # FULL ZERO (DATA LOSS)  ✅ now works in Streamlit too
-    # =====================================================
     total_zero = (df[base_numeric_cols] == 0).all(axis=1)
 
-    # =====================================================
-    # REACTOR OFF (currents = 0, voltage present, not full-zero)
-    # =====================================================
     reactor_off = (
         (df[["SR_I1_A", "SR_I2_A", "SR_I3_A"]] == 0).all(axis=1)
         & (df["SR_U12_kV"] > 0)
         & (~total_zero)
     )
 
-    # =====================================================
-    # IQR OUTLIERS (exclude only FULL ZERO rows)
-    # =====================================================
     valid = df.loc[~total_zero, selected_col].dropna()
     iqr_mask = pd.Series(False, index=df.index)
 
@@ -320,15 +273,8 @@ def reactor_full_visualization_interactive(
             & ((df[selected_col] < lower_iqr) | (df[selected_col] > upper_iqr))
         )
 
-    # =====================================================
-# DESIGN LIMIT VIOLATIONS
-# Exclude ONLY FULL ZERO rows
-# Reactor OFF rows are allowed to be violations
-# =====================================================
-
     limit_mask = pd.Series(False, index=df.index)
 
-# Valid data = not full zero
     valid_data = ~total_zero
 
     if "U" in selected_col and selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]:
@@ -343,12 +289,9 @@ def reactor_full_visualization_interactive(
             ((df[selected_col] < 112.6) | (df[selected_col] > 137.6))
         )
 
-    # =====================================================
-    # FIGURE
-    # =====================================================
+
     fig = go.Figure()
 
-    # Signal
     fig.add_trace(go.Scatter(
         x=df_plot[time_col],
         y=df_plot[selected_col],
@@ -357,7 +300,6 @@ def reactor_full_visualization_interactive(
         name="Signal"
     ))
 
-    # IQR outliers
     fig.add_trace(go.Scatter(
         x=df.loc[iqr_mask, time_col],
         y=df.loc[iqr_mask, selected_col],
@@ -366,7 +308,6 @@ def reactor_full_visualization_interactive(
         name="IQR Outlier"
     ))
 
-    # Design limit exceeded
     fig.add_trace(go.Scatter(
         x=df.loc[limit_mask, time_col],
         y=df.loc[limit_mask, selected_col],
@@ -375,7 +316,6 @@ def reactor_full_visualization_interactive(
         name="Design Limit Exceeded"
     ))
 
-    # Limit lines
     if "U" in selected_col and selected_col not in ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]:
         fig.add_hline(y=27, line_dash="dash", line_color="green")
         fig.add_hline(y=33, line_dash="dash", line_color="green")
@@ -414,7 +354,6 @@ def reactor_full_visualization_interactive(
         name="Reactor OFF"
     ))
 
-    # FULL ZERO blocks (magenta vrect) ✅ better than per-row vline (fast + visible)
     change = total_zero.astype(int).diff().fillna(0)
     starts = df.loc[change == 1, time_col].tolist()
     ends = df.loc[change == -1, time_col].tolist()
@@ -438,13 +377,12 @@ def reactor_full_visualization_interactive(
         name="Full Data Loss"
     ))
 
-    # Timestamp gaps (black dotted vertical lines)
     for gap_time in gap_times:
         fig.add_vline(
             x=gap_time,
             line_dash="dot",
-            line_color="rgba(0,0,0,0.35)",  # lighter gray
-            line_width=1                   # thinner
+            line_color="rgba(0,0,0,0.35)",  
+            line_width=1                   
         )
 
     fig.add_trace(go.Scatter(
@@ -467,7 +405,6 @@ def calculate_imbalance(df: pd.DataFrame):
 
     df = df.copy()
 
-    # Mask valid operating state
     valid_current = (
         (df[["SR_I1_A","SR_I2_A","SR_I3_A"]].mean(axis=1) > 10)
     )
@@ -476,7 +413,6 @@ def calculate_imbalance(df: pd.DataFrame):
         (df[["SR_U12_kV","SR_U23_kV","SR_U31_kV"]].mean(axis=1) > 5)
     )
 
-    # LINE VOLTAGE
     line_cols = ["SR_U12_kV", "SR_U23_kV", "SR_U31_kV"]
     line_mean = df[line_cols].mean(axis=1)
 
@@ -486,7 +422,6 @@ def calculate_imbalance(df: pd.DataFrame):
         np.nan
     )
 
-    # PHASE VOLTAGE
     phase_cols = ["SR_U1_kV", "SR_U2_kV", "SR_U3_kV"]
     phase_mean = df[phase_cols].mean(axis=1)
 
@@ -496,7 +431,6 @@ def calculate_imbalance(df: pd.DataFrame):
         np.nan
     )
 
-    # CURRENT
     current_cols = ["SR_I1_A", "SR_I2_A", "SR_I3_A"]
     current_mean = df[current_cols].mean(axis=1)
 
@@ -514,9 +448,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
     df = df.sort_values(time_col).reset_index(drop=True)
 
-    # =====================================================
-    # TIMESTAMP GAP DETECTION
-    # =====================================================
     diff = df[time_col].diff()
     expected_freq = diff.mode()[0] if not diff.mode().empty else None
 
@@ -527,7 +458,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
         gap_mask = diff > expected_freq
         gap_times = df.loc[gap_mask, time_col].tolist()
 
-    # Break line BEFORE gap (not remove real values)
     df_plot = df.copy()
     imbalance_cols = ["U_line_imbalance_%", "U_phase_imbalance_%", "I_imbalance_%"]
 
@@ -539,9 +469,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
                 if col in df_plot.columns:
                     df_plot.loc[idx - 1, col] = np.nan
 
-    # =====================================================
-    # FULL ZERO BLOCKS
-    # =====================================================
     base_numeric_cols = [
         c for c in df.select_dtypes(include=np.number).columns
         if not c.endswith("_%")
@@ -571,9 +498,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
 
     fig = go.Figure()
 
-    # =========================
-    # Imbalance Lines
-    # =========================
     fig.add_trace(go.Scatter(
         x=df_plot[time_col],
         y=df_plot["U_line_imbalance_%"],
@@ -598,9 +522,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
         name="Current Imbalance (%)"
     ))
 
-    # =========================
-    # Thresholds
-    # =========================
     for level in [2, 3, 5]:
         fig.add_hline(y=level, line_dash="dash")
 
@@ -611,9 +532,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
         name="Imbalance Thresholds (2%, 3%, 5%)"
     ))
 
-    # =========================
-    # Reactor OFF
-    # =========================
     starts, ends = _get_blocks(reactor_off)
 
     for start, end in zip(starts, ends):
@@ -631,9 +549,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
         name="Reactor OFF"
     ))
 
-    # =========================
-    # Full Data Loss
-    # =========================
     starts, ends = _get_blocks(total_zero)
 
     for start, end in zip(starts, ends):
@@ -652,9 +567,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
         name="Full Data Loss"
     ))
 
-    # =========================
-    # Timestamp Gaps
-    # =========================
     for gap_time in gap_times:
         fig.add_vline(
             x=gap_time,
@@ -670,9 +582,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
         name="Timestamp Gap"
     ))
 
-    # =========================
-    # Layout
-    # =========================
     fig.update_layout(
         title="Voltage & Current Imbalance Monitoring",
         height=720,
@@ -681,7 +590,6 @@ def plot_imbalance(df: pd.DataFrame, time_col: str = "TimeStamp") -> go.Figure:
         yaxis_title="Imbalance (%)"
     )
 
-    # AUTO SCALE (important)
     fig.update_yaxes(autorange=True)
 
     return fig
